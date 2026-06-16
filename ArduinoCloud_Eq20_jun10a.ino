@@ -1,160 +1,282 @@
-#include "arduino_secrets.h"
-#include "thingProperties.h"
+#include <ArduinoIoTCloud.h>
+#include <Arduino_ConnectionHandler.h>
 
-// Mapeamento dos pinos no ESP32-S3
-const int PINO_TEMP   = 4;   
-const int PINO_LDR    = 5;   
-const int PINO_POT    = 6;   
-const int PINO_BOTAO  = 7;   
-const int PINO_LED_R  = 15;  
-const int PINO_LED_G  = 16;  
-const int PINO_LED_B  = 17;  
-const int PINO_BUZZER = 18;  
+// ======================================================
+// Configurações de Autenticação do Dispositivo
+// ======================================================
 
-// Variaveis de controle
-volatile bool sistema_ativo = true; 
-unsigned long tempo_anterior = 0;
-const long intervalo = 2000;         
+const char DEVICE_LOGIN_NAME[] = "e0023e43-a9fa-453e-8b28-2a90aa8d2f9e";
+const char SSID[] = "CIMATEC-VISITANTE";
+const char PASS[] = "";
+const char DEVICE_KEY[] = "TOM6HBg202qtvx!GfBQ0xIm9v";
 
-// Funcao de interrupcao do botao de emergencia
-void IRAM_ATTR tratarBotao() {
-  static unsigned long ultimo_debounce = 0;
-  unsigned long tempo_atual = millis();
-  
-  if (tempo_atual - ultimo_debounce > 200) {
-    sistema_ativo = !sistema_ativo; 
-    ultimo_debounce = tempo_atual;
-  }
+// ======================================================
+// Variáveis do Arduino IoT Cloud
+// ======================================================
+
+String comando;
+float temperatura;
+int luminosidade;
+
+// ======================================================
+// Handler de conexão
+// ======================================================
+
+WiFiConnectionHandler ArduinoIoTPreferredConnection(SSID, PASS);
+
+// ======================================================
+// Protótipos de funções
+// ======================================================
+
+void onComandoChange();
+void desligarLED();
+void mudarCor(int r, int g, int b);
+
+// ======================================================
+// Inicialização das propriedades da nuvem
+// ======================================================
+
+void initProperties()
+{
+    ArduinoCloud.setBoardId(DEVICE_LOGIN_NAME);
+    ArduinoCloud.setSecretDeviceKey(DEVICE_KEY);
+
+    ArduinoCloud.addProperty(
+        comando,
+        READWRITE,
+        ON_CHANGE,
+        onComandoChange
+    );
+
+    ArduinoCloud.addProperty(
+        temperatura,
+        READ,
+        5 * SECONDS,
+        NULL
+    );
+
+    ArduinoCloud.addProperty(
+        luminosidade,
+        READ,
+        5 * SECONDS,
+        NULL
+    );
 }
 
-void setup() {
-  Serial.begin(9600);
-  delay(1500); 
+// ======================================================
+// Definição dos pinos
+// ======================================================
 
-  // Configuracao das saidas
-  pinMode(PINO_LED_R, OUTPUT);
-  pinMode(PINO_LED_G, OUTPUT);
-  pinMode(PINO_LED_B, OUTPUT);
-  pinMode(PINO_BUZZER, OUTPUT);
-  
-  // Configuracao do botao com interrupcao
-  pinMode(PINO_BOTAO, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PINO_BOTAO), tratarBotao, FALLING);
+const int PIN_RED = 12;
+const int PIN_GREEN = 13;
+const int PIN_BLUE = 14;
+const int PIN_BUZZER = 5;
 
-  // Inicializacao do Arduino IoT Cloud
-  initProperties();
-  ArduinoCloud.begin(ArduinoIoTPreferredConnection);
-  
-  setDebugMessageLevel(2);
-  ArduinoCloud.printDebugInfo();
+const int PIN_TEMP = A0;
+const int PIN_LDR = A1;
+
+// ======================================================
+// Variáveis de controle
+// ======================================================
+
+bool tempAtiva = true;
+bool detectorAtivo = true;
+bool buzzerAtivo = true;
+
+unsigned long tempoLed_MS = 0;
+bool corTemporariaAtiva = false;
+
+// ======================================================
+// Setup
+// ======================================================
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(1500);
+
+    // Correção para problemas de conexão WiFi
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_STA);
+    delay(1000);
+
+    // Inicializa propriedades da nuvem
+    initProperties();
+
+    ArduinoCloud.begin(ArduinoIoTPreferredConnection);
+
+    setDebugMessageLevel(2);
+    ArduinoCloud.printDebugInfo();
+
+    // Configura pinos
+    pinMode(PIN_RED, OUTPUT);
+    pinMode(PIN_GREEN, OUTPUT);
+    pinMode(PIN_BLUE, OUTPUT);
+    pinMode(PIN_BUZZER, OUTPUT);
 }
 
-void loop() {
-  ArduinoCloud.update(); 
-  
-  unsigned long tempo_atual = millis();
+// ======================================================
+// Loop principal
+// ======================================================
 
-  // Se o botao de emergencia for ativado, desliga tudo
-  if (!sistema_ativo) {
-    apagarLED();
-    noTone(PINO_BUZZER);
-    led_status = false; 
-    return; 
-  }
+void loop()
+{
+    ArduinoCloud.update();
 
-  // Leitura dos sensores a cada 2 segundos
-  if (tempo_atual - tempo_anterior >= intervalo) {
-    tempo_anterior = tempo_atual;
+    // -------------------------
+    // Sensor de temperatura
+    // -------------------------
+    if (tempAtiva)
+    {
+        int leituraTemp = analogRead(PIN_TEMP);
 
-    // Leitura da temperatura
-    int leitura_temp_bruta = analogRead(PINO_TEMP);
-    temperature = (leitura_temp_bruta * 3.3 / 4095.0) * 100.0; 
-
-    // Leitura do LDR
-    int leitura_ldr = analogRead(PINO_LDR);
-    lux_level = map(leitura_ldr, 0, 4095, 100, 0); 
-
-    // Envio para o Monitor Serial
-    Serial.print("Temperatura: ");
-    Serial.print(temperature);
-    Serial.println(" C");
-    Serial.print("Luminosidade: ");
-    Serial.print(lux_level);
-    Serial.println(" %");
-
-    // Condicao de perigo por temperatura
-    if (temperature < 0.0 || temperature > 25.0) {
-      Serial.println("Perigo! Desligar!");
-      apagarLED();
-      tone(PINO_BUZZER, 1000); 
-      led_status = false;
-    } 
-    // Funcionamento normal do sistema
-    else {
-      noTone(PINO_BUZZER); 
-      
-      // Automacao por luz (Ambiente Escuro)
-      if (lux_level < 30.0) {
-        led_status = true; 
-        
-        // Controle de cor pelo potenciometro
-        int valor_pot = analogRead(PINO_POT);
-        
-        if (valor_pot < 1365) {
-          definirCorRGB(255, 0, 0); 
-          led_color = "Vermelho";
-        } else if (valor_pot >= 1365 && valor_pot < 2730) {
-          definirCorRGB(255, 255, 0); 
-          led_color = "Amarelo";
-        } else {
-          definirCorRGB(0, 0, 255); 
-          led_color = "Azul";
-        }
-      } 
-      // Ambiente Claro
-      else {
-        apagarLED();
-        led_status = false;
-      }
+        temperatura =
+            (leituraTemp * 5.0 / 1023.0) * 100.0;
     }
-  }
+    else
+    {
+        temperatura = 0;
+    }
+
+    // -------------------------
+    // Sensor de luminosidade
+    // -------------------------
+    if (detectorAtivo)
+    {
+        luminosidade = analogRead(PIN_LDR);
+    }
+    else
+    {
+        luminosidade = 0;
+    }
+
+    // -------------------------
+    // Controle de tempo do LED
+    // -------------------------
+    if (
+        corTemporariaAtiva &&
+        (millis() - tempoLed_MS >= 1000)
+    )
+    {
+        desligarLED();
+        corTemporariaAtiva = false;
+    }
 }
 
-// Funcoes para o LED RGB
-void definirCorRGB(int r, int g, int b) {
-  analogWrite(PINO_LED_R, r);
-  analogWrite(PINO_LED_G, g);
-  analogWrite(PINO_LED_B, b);
+// ======================================================
+// Funções auxiliares
+// ======================================================
+
+void desligarLED()
+{
+    digitalWrite(PIN_RED, LOW);
+    digitalWrite(PIN_GREEN, LOW);
+    digitalWrite(PIN_BLUE, LOW);
 }
 
-void apagarLED() {
-  analogWrite(PINO_LED_R, 0);
-  analogWrite(PINO_LED_G, 0);
-  analogWrite(PINO_LED_B, 0);
+void mudarCor(int r, int g, int b)
+{
+    digitalWrite(PIN_RED, r);
+    digitalWrite(PIN_GREEN, g);
+    digitalWrite(PIN_BLUE, b);
 }
 
-// Controle do LED via Dashboard
-void onLedStatusChange()  {
-  if (led_status && sistema_ativo) {
-    definirCorRGB(255, 255, 255); 
-    Serial.println("LED ligado via Nuvem");
-  } else {
-    apagarLED();
-    Serial.println("LED desligado via Nuvem");
-  }
-}
+// ======================================================
+// Callback da variável "comando"
+// ======================================================
 
-// Controle de cor via Dashboard
-void onLedColorChange()  {
-  if (!led_status || !sistema_ativo) return;
+void onComandoChange()
+{
+    Serial.print("Comando recebido: ");
+    Serial.println(comando);
 
-  if (led_color == "Vermelho" || led_color == "vermelho") {
-    definirCorRGB(255, 0, 0);
-  } else if (led_color == "Amarelo" || led_color == "amarelo") {
-    definirCorRGB(255, 255, 0);
-  } else if (led_color == "Azul" || led_color == "azul") {
-    definirCorRGB(0, 0, 255);
-  }
-  Serial.print("Cor alterada via Nuvem para: ");
-  Serial.println(led_color);
+    // -------------------------
+    // Ligar / Desligar geral
+    // -------------------------
+
+    if (comando == "Ligar")
+    {
+        mudarCor(HIGH, HIGH, HIGH);
+        corTemporariaAtiva = false;
+    }
+    else if (comando == "Desligar")
+    {
+        desligarLED();
+        corTemporariaAtiva = false;
+    }
+
+    // -------------------------
+    // Cores temporárias
+    // -------------------------
+
+    else if (comando == "Vermelho")
+    {
+        mudarCor(HIGH, LOW, LOW);
+
+        tempoLed_MS = millis();
+        corTemporariaAtiva = true;
+    }
+    else if (comando == "Amarelo")
+    {
+        mudarCor(HIGH, HIGH, LOW);
+
+        tempoLed_MS = millis();
+        corTemporariaAtiva = true;
+    }
+    else if (comando == "Azul")
+    {
+        mudarCor(LOW, LOW, HIGH);
+
+        tempoLed_MS = millis();
+        corTemporariaAtiva = true;
+    }
+
+    // -------------------------
+    // Temperatura
+    // -------------------------
+
+    else if (comando == "Desativar Temperatura")
+    {
+        tempAtiva = false;
+        Serial.println("Sensor de Temperatura Desativado.");
+    }
+    else if (comando == "Ativar Temperatura")
+    {
+        tempAtiva = true;
+        Serial.println("Sensor de Temperatura Ativado.");
+    }
+
+    // -------------------------
+    // Detector (LDR)
+    // -------------------------
+
+    else if (comando == "Desativar Detector")
+    {
+        detectorAtivo = false;
+        Serial.println("Fotorresistor Desativado.");
+    }
+    else if (comando == "Ativar Detector")
+    {
+        detectorAtivo = true;
+        Serial.println("Fotorresistor Ativado.");
+    }
+
+    // -------------------------
+    // Buzzer
+    // -------------------------
+
+    else if (comando == "Desativar Buzzer")
+    {
+        buzzerAtivo = false;
+
+        digitalWrite(PIN_BUZZER, LOW);
+
+        Serial.println("Buzzer Desativado.");
+    }
+    else if (comando == "Ativar Buzzer")
+    {
+        buzzerAtivo = true;
+
+        Serial.println("Buzzer Ativado.");
+    }
 }
